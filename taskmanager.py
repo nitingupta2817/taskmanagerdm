@@ -54,6 +54,10 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.session_state.role = ""
+if "tasks_updated" not in st.session_state:
+    st.session_state.tasks_updated = False
+if "tasks_assigned" not in st.session_state:
+    st.session_state.tasks_assigned = False
 
 # --- MENU ---
 if not st.session_state.logged_in:
@@ -83,7 +87,7 @@ elif choice == "Login":
             st.session_state.logged_in = True
             st.session_state.username = user["username"]
             st.session_state.role = user["role"]
-            st.experimental_rerun()
+            st.success(f"Logged in as {st.session_state.username}")
         else:
             st.error("Invalid credentials")
 
@@ -96,7 +100,7 @@ elif choice == "Dashboard":
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.role = ""
-        st.experimental_rerun()
+        st.success("Logged out successfully.")
 
     # --- ADMIN PANEL ---
     if st.session_state.role == "Admin":
@@ -110,9 +114,12 @@ elif choice == "Dashboard":
 
             if st.button("Assign Task"):
                 assign_task(task_user, task_desc)
-                st.success(f"Task '{task_desc}' assigned to {task_user}")
-        else:
-            st.warning("No team members found. Please register users first.")
+                st.session_state.tasks_assigned = True
+
+        # Show success message if task assigned
+        if st.session_state.tasks_assigned:
+            st.success(f"Task '{task_desc}' assigned to {task_user}")
+            st.session_state.tasks_assigned = False
 
         st.subheader("All Tasks")
         tasks = get_all_tasks()
@@ -124,9 +131,7 @@ elif choice == "Dashboard":
         st.subheader("My Tasks")
         tasks = get_user_tasks(st.session_state.username)
 
-        # Track if any task updated
         task_updated_in_this_run = False
-
         for t in tasks:
             st.write(f"📌 {t['task']} - Status: {t['status']}")
             if t['status'] == "Pending":
@@ -135,7 +140,7 @@ elif choice == "Dashboard":
                     update_task_status(t['id'], "Done")
                     task_updated_in_this_run = True
 
-        # Safely rerun once after all updates
+        # Show success message and refresh tasks dynamically
         if task_updated_in_this_run:
             st.success("Task Updated!")
-            st.experimental_rerun()
+            tasks = get_user_tasks(st.session_state.username)  # refresh tasks
