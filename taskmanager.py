@@ -91,6 +91,7 @@ def add_task_type(task_name):
 def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks="", details_list=None):
     """
     Creates tasks and attaches multiple detail rows to each created task.
+    Compatible with older supabase-py (no .insert(...).select()).
     details_list: list of dicts like {"title":..., "url":..., "keywords":..., "description":...}
     """
     date_str = _to_datestr(date_val)
@@ -108,13 +109,39 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                 "quantity": int(qty),
                 "remarks": remarks
             }
-            # Insert and return row (to get task id)
-            res = supabase.table("tasks").insert(payload).select("*").execute()
-            if not res.data:
-                continue
-            task_id = res.data[0]["id"]
 
-            # Attach all details
+            # 1) Insert (no .select() chaining for older libs)
+            ins = supabase.table("tasks").insert(payload).execute()
+
+            # 2) Resolve task_id from insert response or fallback lookup
+            task_id = None
+            if getattr(ins, "data", None):
+                try:
+                    task_id = ins.data[0]["id"]
+                except (IndexError, KeyError, TypeError):
+                    task_id = None
+
+            if task_id is None:
+                # Fallback read (best-effort, using identifying fields)
+                lookup = (
+                    supabase.table("tasks")
+                    .select("id")
+                    .eq("assigned_to", user)
+                    .eq("task", task_name)
+                    .eq("date", date_str)
+                    .eq("deadline", deadline_str)
+                    .order("id", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if getattr(lookup, "data", None):
+                    task_id = lookup.data[0]["id"]
+
+            if not task_id:
+                # Couldn’t resolve inserted row; skip attaching details for this one
+                continue
+
+            # 3) Attach details (if any)
             if details_list:
                 child_rows = []
                 for d in details_list:
