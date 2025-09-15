@@ -28,7 +28,7 @@ import plotly.express as px
 st.set_page_config(page_title="Advanced CRM - Task Manager", page_icon="📋", layout="wide")
 
 SUPABASE_URL = "https://fijvjhbhxdbinqdiiytq.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpanZqaGJoeGRiaW5xZGlpeXRxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzkxNTk5OSwiZXhwIjoyMDczNDkxOTk5fQ.8tZln8rHlB_OpDG4q_w3TeRTdJyPKQJr_OF-q7QlGz8"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpanZqaGJoeGRiaW5xZGlpeXRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MTU5OTksImV4cCI6MjA3MzQ5MTk5OX0.aR5Sl9Z9wnCMQhRwHJ6dEXwAWTnxn-yxDqomL9KEHag"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Compatibility helper for Streamlit rerun across versions
@@ -588,3 +588,4 @@ else:
                             )
                             st.success("Updated.")
                             _rerun()
+
