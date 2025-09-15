@@ -31,6 +31,12 @@ SUPABASE_URL = "https://fijvjhbhxdbinqdiiytq.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpanZqaGJoeGRiaW5xZGlpeXRxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzkxNTk5OSwiZXhwIjoyMDczNDkxOTk5fQ.8tZln8rHlB_OpDG4q_w3TeRTdJyPKQJr_OF-q7QlGz8"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Compatibility helper for Streamlit rerun across versions
+try:
+    _rerun = st.rerun          # New API
+except AttributeError:
+    _rerun = st.experimental_rerun  # Old API
+
 # ---------------- DEFAULT TASK TYPES ----------------
 DEFAULT_TASK_TYPES = [
     "Forum Submission", "SBM", "Social Bookmarking", "Web 2.0/Profile Creation",
@@ -215,7 +221,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.username = user["username"]
                 st.session_state.role = user["role"]
-                st.experimental_rerun()
+                _rerun()
             else:
                 st.error("Invalid credentials")
 
@@ -226,7 +232,7 @@ else:
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.role = ""
-        st.experimental_rerun()
+        _rerun()
 
     if st.session_state.role == "Admin":
         menu = ["User Management", "Task List Management", "Add New Task", "Task Management", "Reports"]
@@ -247,7 +253,7 @@ else:
             if st.button("Delete Selected Users"):
                 delete_users([u.split(" ")[0] for u in selected_users])
                 st.success("Selected users deleted!")
-                st.experimental_rerun()
+                _rerun()
 
         with col2:
             edit_user_select = st.selectbox("Select a user to edit", ["--"] + user_list)
@@ -258,7 +264,7 @@ else:
                     old_username = edit_user_select.split(" ")[0]
                     update_user(old_username, new_username or old_username, new_role)
                     st.success("User updated!")
-                    st.experimental_rerun()
+                    _rerun()
 
     # ---------- TASK LIST MANAGEMENT (Admin) ----------
     elif choice == "Task List Management" and st.session_state.role == "Admin":
@@ -271,7 +277,7 @@ else:
             if new_task_type:
                 add_task_type(new_task_type)
                 st.success(f"Task type '{new_task_type}' added!")
-                st.experimental_rerun()
+                _rerun()
 
     # ---------- ADD NEW TASK (Admin) ----------
     elif choice == "Add New Task" and st.session_state.role == "Admin":
@@ -319,7 +325,7 @@ else:
                     st.write(f"**Description:** {d.get('description','')}")
                     if st.button("Remove this detail", key=f"remove_detail_{i}"):
                         st.session_state.details_draft.pop(i)
-                        st.experimental_rerun()
+                        _rerun()
 
         st.divider()
         remarks = st.text_input("Remarks", "")
@@ -366,7 +372,7 @@ else:
                 if st.button("Delete Selected Tasks"):
                     delete_tasks([int(t.split("|")[0]) for t in selected_tasks_to_delete])
                     st.success("Selected tasks deleted!")
-                    st.experimental_rerun()
+                    _rerun()
 
             with colR:
                 edit_task_select = st.selectbox("Select task to edit", ["--"] + task_list, key="edit_task_select")
@@ -396,7 +402,7 @@ else:
                             deadline=_to_datestr(new_deadline)
                         )
                         st.success("Task updated!")
-                        st.experimental_rerun()
+                        _rerun()
 
                     st.markdown("### Task Details (rows attached to this task)")
                     if details_rows:
@@ -411,7 +417,7 @@ else:
                         if st.button("Delete Selected Details"):
                             delete_task_detail_rows(del_ids)
                             st.success("Selected details deleted.")
-                            st.experimental_rerun()
+                            _rerun()
                     else:
                         st.info("No details yet.")
 
@@ -423,7 +429,7 @@ else:
                     if st.button("Add Detail Row"):
                         add_task_detail_row(task_id, nd_title, nd_url, nd_keywords, nd_description)
                         st.success("Detail row added.")
-                        st.experimental_rerun()
+                        _rerun()
         else:
             st.info("No tasks found.")
 
@@ -554,4 +560,4 @@ else:
                                 remarks=new_remarks
                             )
                             st.success("Updated.")
-                            st.experimental_rerun()
+                            _rerun()
