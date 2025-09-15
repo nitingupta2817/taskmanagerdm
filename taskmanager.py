@@ -54,8 +54,6 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.session_state.role = ""
-if "task_updated" not in st.session_state:
-    st.session_state.task_updated = False
 
 # --- MENU ---
 if not st.session_state.logged_in:
@@ -125,15 +123,19 @@ elif choice == "Dashboard":
     else:
         st.subheader("My Tasks")
         tasks = get_user_tasks(st.session_state.username)
+
+        # Track if any task updated
+        task_updated_in_this_run = False
+
         for t in tasks:
             st.write(f"📌 {t['task']} - Status: {t['status']}")
             if t['status'] == "Pending":
-                btn_key = f"done_{t['id']}"  # unique key per button
+                btn_key = f"done_{t['id']}"
                 if st.button("Mark Done", key=btn_key):
                     update_task_status(t['id'], "Done")
-                    st.session_state.task_updated = True
+                    task_updated_in_this_run = True
 
-        # Rerun once if any task updated
-        if st.session_state.task_updated:
-            st.session_state.task_updated = False
+        # Safely rerun once after all updates
+        if task_updated_in_this_run:
+            st.success("Task Updated!")
             st.experimental_rerun()
