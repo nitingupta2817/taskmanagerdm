@@ -541,20 +541,52 @@ else:
             if "quantity" not in df.columns:
                 df["quantity"] = 1
 
-            df["completed"] = df["quantity_done"].astype(int)
-            df["assigned"]  = df["quantity"].astype(int)
-            df["remaining"] = (df["assigned"] - df["completed"]).clip(lower=0).astype(int)
-            df["is_done"]   = df["status"].fillna("Pending").eq("Done")
-            df["needs_attention"] = (df["remaining"] > 0) | (~df["is_done"])
+            df["completed_units"] = df["quantity_done"].astype(int)
+            df["assigned_units"]  = df["quantity"].astype(int)
+            df["remaining_units"] = (df["assigned_units"] - df["completed_units"]).clip(lower=0).astype(int)
+            df["status"] = df["status"].fillna("Pending")
+            df["is_done"] = df["status"].eq("Done")
+            df["needs_attention"] = (df["remaining_units"] > 0) | (~df["is_done"])
 
+            # ---- Filters: User + View Mode (Date or Month) ----
             user_filter = st.selectbox("Filter by User", ["All"] + [u['username'] for u in get_all_users()])
-            month_filter = st.date_input("Filter by Month", value=date.today())
+
+            col_f1, col_f2 = st.columns([1, 2])
+            with col_f1:
+                view_mode = st.radio("View", ["Date-wise", "Month-wise"], horizontal=True)
 
             filtered_df = df.copy()
             if user_filter != "All":
                 filtered_df = filtered_df[filtered_df['assigned_to'] == user_filter]
-            if "date" in filtered_df.columns:
-                filtered_df = filtered_df[filtered_df['date'].dt.month == month_filter.month]
+
+            # Build month dropdown options from data (unique Year-Month)
+            def _month_label(p):  # p is a pandas Period('YYYY-MM', 'M')
+                return p.strftime("%B %Y")  # e.g., "September 2025"
+
+            if "date" in filtered_df.columns and not filtered_df.empty:
+                # only valid dates
+                valid_dates = filtered_df[filtered_df["date"].notna()].copy()
+                unique_months = sorted(valid_dates["date"].dt.to_period("M").unique())
+            else:
+                unique_months = []
+
+            with col_f2:
+                if view_mode == "Date-wise":
+                    picked_date = st.date_input("Select Date", value=date.today(), key="admin_report_date")
+                    # exact date-only match
+                    filtered_df = filtered_df[filtered_df["date"].dt.date == picked_date]
+                else:
+                    if unique_months:
+                        month_labels = [_month_label(p) for p in unique_months]
+                        default_idx = len(unique_months) - 1  # latest month selected by default
+                        picked_label = st.selectbox("Select Month", month_labels, index=default_idx)
+                        # map back to period
+                        picked_period = unique_months[month_labels.index(picked_label)]
+                        # filter by month + year
+                        filtered_df = filtered_df[filtered_df["date"].dt.to_period("M") == picked_period]
+                    else:
+                        st.info("No month data available.")
+                        filtered_df = filtered_df.iloc[0:0]  # empty
 
             # --- Bring in assigned detail rows for the visible tasks ---
             if not filtered_df.empty:
@@ -582,29 +614,48 @@ else:
                     lambda tid: "\n".join([k for k in keywords_map.get(int(tid), []) if k])
                 )
 
-            # Summary KPIs
+            # -------------------- Summary KPIs --------------------
+            # task-level counts (as requested)
             if not filtered_df.empty:
+                total_assigned_tasks = len(filtered_df)  # number of tasks in view
+                total_done_tasks = int((filtered_df["status"] == "Done").sum())
+                total_pending_tasks = int((filtered_df["status"] == "Pending").sum())
+                total_half_tasks = int((filtered_df["status"] == "Half").sum())
+
                 colk1, colk2, colk3, colk4 = st.columns(4)
                 with colk1:
-                    st.metric("Total Tasks", len(filtered_df))
+                    st.metric("Total Assigned Tasks", total_assigned_tasks)
                 with colk2:
-                    st.metric("Done", int(filtered_df["is_done"].sum()))
+                    st.metric("Total Done Tasks", total_done_tasks)
                 with colk3:
-                    st.metric("Remaining Units", int(filtered_df["remaining"].sum()))
+                    st.metric("Total Pending Tasks", total_pending_tasks)
                 with colk4:
-                    st.metric("Needs Attention", int(filtered_df["needs_attention"].sum()))
+                    st.metric("Half (In Progress)", total_half_tasks)
 
-            # Styled table: now includes detail columns
+                # unit-level KPIs (kept)
+                colu1, colu2, colu3, colu4 = st.columns(4)
+                with colu1:
+                    st.metric("Assigned Units", int(filtered_df["assigned_units"].sum()))
+                with colu2:
+                    st.metric("Completed Units", int(filtered_df["completed_units"].sum()))
+                with colu3:
+                    st.metric("Remaining Units", int(filtered_df["remaining_units"].sum()))
+                with colu4:
+                    st.metric("Needs Attention (tasks)", int(filtered_df["needs_attention"].sum()))
+            else:
+                st.info("No data for the selected filter.")
+
+            # -------------------- Styled Table --------------------
             display_cols = [
                 "id","task","assigned_to","status",
-                "assigned","completed","remaining",
+                "assigned_units","completed_units","remaining_units",
                 "date","deadline","remarks",
                 "detail_titles","detail_urls","detail_keywords"
             ]
             show_df = filtered_df[display_cols] if not filtered_df.empty else filtered_df
 
             def _row_style(row):
-                if (row["remaining"] > 0) or (row["status"] != "Done"):
+                if (row["remaining_units"] > 0) or (row["status"] != "Done"):
                     return ["background-color: #ffe6e6; color: #b00000"] * len(row)
                 return [""] * len(row)
 
@@ -614,15 +665,16 @@ else:
             else:
                 st.dataframe(show_df.style.apply(_row_style, axis=1), use_container_width=True)
 
-            # Chart: per-user bars of Completed vs Remaining
+            # -------------------- Charts --------------------
             if not filtered_df.empty:
-                agg = (
+                # Per-user Completed vs Remaining (units)
+                agg_units = (
                     filtered_df
-                    .groupby("assigned_to", as_index=False)[["completed","remaining"]]
+                    .groupby("assigned_to", as_index=False)[["completed_units","remaining_units"]]
                     .sum()
                 )
-                agg_melt = agg.melt(id_vars="assigned_to", value_vars=["completed","remaining"],
-                                    var_name="Metric", value_name="Units")
+                agg_melt = agg_units.melt(id_vars="assigned_to", value_vars=["completed_units","remaining_units"],
+                                          var_name="Metric", value_name="Units")
                 fig = px.bar(
                     agg_melt,
                     x="assigned_to",
@@ -632,6 +684,18 @@ else:
                     title="Completed vs Remaining Units by User"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+                # Task count by status (for the selected period)
+                count_by_status = (
+                    filtered_df.groupby("status", as_index=False)["id"].count().rename(columns={"id": "Tasks"})
+                )
+                fig2 = px.bar(
+                    count_by_status,
+                    x="status",
+                    y="Tasks",
+                    title="Task Count by Status (Selected Period)"
+                )
+                st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("No tasks found.")
 
