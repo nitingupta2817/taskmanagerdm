@@ -81,7 +81,6 @@ def add_task_type(task_name):
 def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks="", details_list=None):
     """
     Creates tasks and attaches multiple detail rows to each created task.
-    Compatible with older supabase-py (no .insert(...).select()).
     details_list: list of dicts like {"title":..., "url":..., "keywords":..., "description":...}
     """
     date_str = _to_datestr(date_val)
@@ -204,6 +203,23 @@ def delete_task_detail_rows(detail_ids):
         return
     for did in detail_ids:
         supabase.table("task_details").delete().eq("id", did).execute()
+
+def get_task_details_bulk(task_ids):
+    """
+    Fetch all detail rows for many tasks at once.
+    Returns a list of rows with fields: id, task_id, title, url, keywords, description
+    """
+    if not task_ids:
+        return []
+    return (
+        supabase
+        .table("task_details")
+        .select("*")
+        .in_("task_id", task_ids)   # supabase-py v1 uses .in_
+        .order("task_id")
+        .order("id")
+        .execute()
+    ).data
 
 # ---------------- STATE ----------------
 st.title("📋 Advanced CRM - Task Manager")
@@ -491,6 +507,32 @@ else:
             if "date" in filtered_df.columns:
                 filtered_df = filtered_df[filtered_df['date'].dt.month == month_filter.month]
 
+            # --- Bring in assigned detail rows for the visible tasks ---
+            if not filtered_df.empty:
+                task_ids = filtered_df["id"].astype(int).tolist()
+                detail_rows = get_task_details_bulk(task_ids)
+
+                # aggregate details per task_id
+                titles_map = {}
+                urls_map = {}
+                keywords_map = {}
+                for d in detail_rows or []:
+                    tid = int(d.get("task_id"))
+                    titles_map.setdefault(tid, []).append((d.get("title") or "").strip())
+                    urls_map.setdefault(tid, []).append((d.get("url") or "").strip())
+                    keywords_map.setdefault(tid, []).append((d.get("keywords") or "").strip())
+
+                # attach 3 new columns (newline-separated for readability)
+                filtered_df["detail_titles"] = filtered_df["id"].map(
+                    lambda tid: "\n".join([t for t in titles_map.get(int(tid), []) if t])
+                )
+                filtered_df["detail_urls"] = filtered_df["id"].map(
+                    lambda tid: "\n".join([u for u in urls_map.get(int(tid), []) if u])
+                )
+                filtered_df["detail_keywords"] = filtered_df["id"].map(
+                    lambda tid: "\n".join([k for k in keywords_map.get(int(tid), []) if k])
+                )
+
             # Summary KPIs
             if not filtered_df.empty:
                 colk1, colk2, colk3, colk4 = st.columns(4)
@@ -503,12 +545,16 @@ else:
                 with colk4:
                     st.metric("Needs Attention", int(filtered_df["needs_attention"].sum()))
 
-            # Styled table: rows red where remaining>0 or status != Done
-            display_cols = ["id","task","assigned_to","status","assigned","completed","remaining","date","deadline","remarks"]
+            # Styled table: now includes detail columns
+            display_cols = [
+                "id","task","assigned_to","status",
+                "assigned","completed","remaining",
+                "date","deadline","remarks",
+                "detail_titles","detail_urls","detail_keywords"  # NEW
+            ]
             show_df = filtered_df[display_cols] if not filtered_df.empty else filtered_df
 
             def _row_style(row):
-                # red background & text when not fully done or status != Done
                 if (row["remaining"] > 0) or (row["status"] != "Done"):
                     return ["background-color: #ffe6e6; color: #b00000"] * len(row)
                 return [""] * len(row)
@@ -517,7 +563,8 @@ else:
             if show_df.empty:
                 st.info("No data for the selected filter.")
             else:
-                st.table(show_df.style.apply(_row_style, axis=1))
+                # For long data, dataframe is friendlier than table (scrollable, sortable).
+                st.dataframe(show_df.style.apply(_row_style, axis=1), use_container_width=True)
 
             # Chart: per-user bars of Completed vs Remaining
             if not filtered_df.empty:
