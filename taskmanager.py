@@ -77,6 +77,24 @@ def get_all_task_types():
 def add_task_type(task_name):
     supabase.table("task_types").insert({"task_name": task_name}).execute()
 
+def delete_task_types(task_names, safe=True):
+    """
+    Delete task types by name.
+    If safe=True, skip any type currently used by a task.
+    Returns a list of names that were skipped.
+    """
+    if not task_names:
+        return []
+    skipped = []
+    for name in task_names:
+        if safe:
+            used = supabase.table("tasks").select("id").eq("task", name).limit(1).execute()
+            if getattr(used, "data", None) and len(used.data) > 0:
+                skipped.append(name)
+                continue
+        supabase.table("task_types").delete().eq("task_name", name).execute()
+    return skipped
+
 # ---------------- TASK HELPERS ----------------
 def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks="", details_list=None):
     """
@@ -100,10 +118,10 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                 "remarks": remarks
             }
 
-            # 1) Insert (no .select() chaining for older libs)
+            # 1) Insert
             ins = supabase.table("tasks").insert(payload).execute()
 
-            # 2) Resolve task_id from insert response or fallback lookup
+            # 2) Resolve task_id
             task_id = None
             if getattr(ins, "data", None):
                 try:
@@ -112,7 +130,7 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                     task_id = None
 
             if task_id is None:
-                # Fallback read (best-effort, using identifying fields)
+                # Fallback read
                 lookup = (
                     supabase.table("tasks")
                     .select("id")
@@ -128,7 +146,7 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                     task_id = lookup.data[0]["id"]
 
             if not task_id:
-                # Couldn’t resolve inserted row; skip attaching details for this one
+                # Couldn’t resolve inserted row; skip attaching details
                 continue
 
             # 3) Attach details (if any)
@@ -309,14 +327,45 @@ else:
     elif choice == "Task List Management" and st.session_state.role == "Admin":
         st.subheader("Manage Task Types")
         task_types = get_all_task_types()
-        st.write("Existing Task Types:")
-        st.write(task_types)
-        new_task_type = st.text_input("Add New Task Type")
-        if st.button("Add Task Type"):
-            if new_task_type:
-                add_task_type(new_task_type)
-                st.success(f"Task type '{new_task_type}' added!")
-                _rerun()
+
+        col_a, col_b = st.columns([1, 1])
+
+        with col_a:
+            st.markdown("**Existing Task Types**")
+            st.write(task_types)
+
+            new_task_type = st.text_input("Add New Task Type")
+            if st.button("Add Task Type"):
+                if new_task_type:
+                    add_task_type(new_task_type.strip())
+                    st.success(f"Task type '{new_task_type}' added!")
+                    _rerun()
+                else:
+                    st.warning("Enter a task type name before adding.")
+
+        with col_b:
+            st.markdown("**Delete Task Types**")
+            types_to_delete = st.multiselect("Select task types to delete", task_types)
+            safe_delete = st.checkbox(
+                "Prevent deletion if any task uses the type (recommended)",
+                value=True
+            )
+
+            if st.button("Delete Selected Types"):
+                if not types_to_delete:
+                    st.info("Select at least one type to delete.")
+                else:
+                    skipped = delete_task_types(types_to_delete, safe=safe_delete)
+                    deleted = list(set(types_to_delete) - set(skipped))
+
+                    if deleted:
+                        st.success("Deleted: " + ", ".join(sorted(deleted)))
+                    if skipped:
+                        st.warning(
+                            "Skipped (in use): " + ", ".join(sorted(skipped)) +
+                            (" — uncheck the safety box to force delete (not recommended)." if safe_delete else "")
+                        )
+                    _rerun()
 
     # ---------- ADD NEW TASK (Admin) ----------
     elif choice == "Add New Task" and st.session_state.role == "Admin":
@@ -550,7 +599,7 @@ else:
                 "id","task","assigned_to","status",
                 "assigned","completed","remaining",
                 "date","deadline","remarks",
-                "detail_titles","detail_urls","detail_keywords"  # NEW
+                "detail_titles","detail_urls","detail_keywords"
             ]
             show_df = filtered_df[display_cols] if not filtered_df.empty else filtered_df
 
@@ -563,7 +612,6 @@ else:
             if show_df.empty:
                 st.info("No data for the selected filter.")
             else:
-                # For long data, dataframe is friendlier than table (scrollable, sortable).
                 st.dataframe(show_df.style.apply(_row_style, axis=1), use_container_width=True)
 
             # Chart: per-user bars of Completed vs Remaining
@@ -594,7 +642,7 @@ else:
         my_tasks = get_user_tasks(st.session_state.username)
         df = pd.DataFrame(my_tasks) if my_tasks else pd.DataFrame(columns=[
             "id","task","status","remarks","quantity","quantity_done","date","deadline",
-            "title","url","keywords","description"  # legacy single-meta (if present)
+            "title","url","keywords","description"
         ])
 
         if df.empty:
@@ -608,7 +656,7 @@ else:
             if "quantity" not in df.columns:
                 df["quantity"] = 1
 
-            # Sidebar: red list of pending tasks (auto clears when Done)
+            # Sidebar: red list of pending tasks
             pending_now = df[df["status"].fillna("Pending") != "Done"]
             if not pending_now.empty:
                 st.sidebar.markdown("### Pending Tasks")
