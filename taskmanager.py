@@ -1,10 +1,15 @@
 # ---------------- IMPORTS ----------------
 import streamlit as st
 from supabase import create_client
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 import pandas as pd
 import plotly.express as px
 import json
+
+# Bulk paste helpers
+import csv
+import io
+import re
 
 # ---------------- PAGE & CLIENT ----------------
 st.set_page_config(page_title="Advanced CRM - Task Manager", page_icon="📋", layout="wide")
@@ -15,9 +20,9 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Compatibility helper for Streamlit rerun across versions
 try:
-    _rerun = st.rerun          # New API
+    _rerun = st.rerun
 except AttributeError:
-    _rerun = st.experimental_rerun  # Old API
+    _rerun = st.experimental_rerun
 
 # ---------------- DEFAULT TASK TYPES ----------------
 DEFAULT_TASK_TYPES = [
@@ -40,15 +45,199 @@ def _link(url: str) -> str:
     return f"[{url}]({url})"
 
 def _status_from_progress(done: int, total: int, fallback: str = "Pending") -> str:
-    if total <= 0: return fallback
-    if done <= 0: return "Pending"
-    if done >= total: return "Done"
+    if total <= 0:
+        return fallback
+    if done <= 0:
+        return "Pending"
+    if done >= total:
+        return "Done"
     return "Half"
 
 def _now_utc():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc)
 
+def chunk_list(items, size=500):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+# ---------------- BULK PASTE PARSER ----------------
+def parse_bulk_details(text: str):
+    """
+    Accepts bulk pasted content and returns (rows, errors)
+
+    Supports:
+      1) Excel/Sheets paste (TSV):  Title<TAB>URL<TAB>Keywords<TAB>Description
+      2) CSV
+      3) Pipe format: Title | URL | Keywords | Description
+      4) Labeled blocks:
+         Title: ...
+         URL: ...
+         Keywords: ...
+         Description: ...
+         (blank line separates entries)
+    """
+    if not text or not text.strip():
+        return [], []
+
+    raw = text.strip()
+
+    # Mode A: labeled blocks
+    label_re = re.compile(r"^(title|url|keywords|description)\s*:\s*(.*)$", re.I)
+    lines = raw.splitlines()
+    if any(label_re.match((l or "").strip() or "") for l in lines):
+        rows = []
+        cur = {"title": "", "url": "", "keywords": "", "description": ""}
+        errors = []
+
+        def flush():
+            nonlocal cur
+            if any(v.strip() for v in cur.values()):
+                rows.append({
+                    "title": cur["title"].strip(),
+                    "url": cur["url"].strip(),
+                    "keywords": cur["keywords"].strip(),
+                    "description": cur["description"].strip()
+                })
+            cur = {"title": "", "url": "", "keywords": "", "description": ""}
+
+        for ln in lines:
+            s = (ln or "").strip()
+            if not s:
+                flush()
+                continue
+
+            m = label_re.match(s)
+            if not m:
+                cur["description"] = (cur["description"] + "\n" + s).strip()
+                continue
+
+            k = m.group(1).lower()
+            v = m.group(2)
+            cur[k] = (cur[k] + ("\n" if cur[k].strip() else "") + v).strip()
+
+        flush()
+        rows = [r for r in rows if any((r.get(k) or "").strip() for k in ("title", "url", "keywords", "description"))]
+        return rows, errors
+
+    # Mode B: delimited rows (TSV/CSV/pipe)
+    sample_line = next((l for l in raw.splitlines() if l.strip()), "")
+    delimiter = "\t" if "\t" in raw else None
+
+    if delimiter is None:
+        for d in ["|", ",", ";"]:
+            if d in sample_line:
+                delimiter = d
+                break
+
+    if delimiter is None:
+        # fallback: each line is a title only
+        rows = [{"title": l.strip(), "url": "", "keywords": "", "description": ""} for l in raw.splitlines() if l.strip()]
+        return rows, []
+
+    f = io.StringIO(raw)
+    reader = csv.reader(f, delimiter=delimiter)
+    all_rows = [[(c or "").strip() for c in r] for r in reader if any(((c or "").strip() for c in r))]
+
+    if not all_rows:
+        return [], []
+
+    header = [c.lower() for c in all_rows[0]]
+    header_set = set(header)
+    header_like = any(h in header_set for h in ["title", "url", "keywords", "description", "keyword", "link", "desc"])
+
+    col_map = {"title": None, "url": None, "keywords": None, "description": None}
+
+    if header_like:
+        def idx(*names):
+            for n in names:
+                if n in header:
+                    return header.index(n)
+            return None
+
+        col_map["title"] = idx("title")
+        col_map["url"] = idx("url", "link")
+        col_map["keywords"] = idx("keywords", "keyword")
+        col_map["description"] = idx("description", "desc")
+        data_rows = all_rows[1:]
+    else:
+        # default fixed order
+        col_map["title"] = 0
+        col_map["url"] = 1
+        col_map["keywords"] = 2
+        col_map["description"] = 3
+        data_rows = all_rows
+
+    rows = []
+    errors = []
+
+    for r in data_rows:
+        def getv(key):
+            j = col_map.get(key)
+            if j is None:
+                return ""
+            return r[j].strip() if j < len(r) else ""
+
+        row = {
+            "title": getv("title"),
+            "url": getv("url"),
+            "keywords": getv("keywords"),
+            "description": getv("description"),
+        }
+        if not any(v.strip() for v in row.values()):
+            continue
+        rows.append(row)
+
+    return rows, errors
+
+# ---------------- BULK CALLBACKS (fix Streamlit session_state exception) ----------------
+def _clear_text_key(text_key: str):
+    st.session_state[text_key] = ""
+
+def _bulk_preview_to_state(text_key: str, out_key_prefix: str):
+    text = st.session_state.get(text_key, "") or ""
+    parsed, errs = parse_bulk_details(text)
+    st.session_state[f"{out_key_prefix}_preview"] = parsed
+    st.session_state[f"{out_key_prefix}_errs"] = errs
+
+def _bulk_add_to_draft(text_key: str, out_key_prefix: str):
+    text = st.session_state.get(text_key, "") or ""
+    parsed, errs = parse_bulk_details(text)
+    st.session_state[f"{out_key_prefix}_errs"] = errs
+    st.session_state[f"{out_key_prefix}_added"] = len(parsed)
+
+    if parsed:
+        st.session_state.details_draft.extend(parsed)
+        st.session_state[text_key] = ""  # allowed inside callback
+
+def _bulk_insert_into_task(task_id: int, text_key: str, out_key_prefix: str):
+    text = st.session_state.get(text_key, "") or ""
+    parsed, errs = parse_bulk_details(text)
+
+    st.session_state[f"{out_key_prefix}_errs"] = errs
+    st.session_state[f"{out_key_prefix}_added"] = 0
+
+    if not parsed:
+        return
+
+    child_rows = []
+    for d in parsed:
+        if not any([d.get("title"), d.get("url"), d.get("keywords"), d.get("description")]):
+            continue
+        child_rows.append({
+            "task_id": task_id,
+            "title": (d.get("title") or "").strip() or None,
+            "url": (d.get("url") or "").strip() or None,
+            "keywords": (d.get("keywords") or "").strip() or None,
+            "description": (d.get("description") or "").strip() or None
+        })
+
+    if child_rows:
+        for chunk in chunk_list(child_rows, 500):
+            supabase.table("task_details").insert(chunk).execute()
+
+    st.session_state[f"{out_key_prefix}_added"] = len(child_rows)
+    st.session_state[text_key] = ""  # allowed inside callback
 
 # ---------------- AUTH HELPERS (demo only) ----------------
 def add_user(username, password, role):
@@ -75,7 +264,7 @@ def get_all_task_types():
         for t in DEFAULT_TASK_TYPES:
             supabase.table("task_types").insert({"task_name": t}).execute()
         response = supabase.table("task_types").select("*").execute()
-    return [t['task_name'] for t in response.data]
+    return [t["task_name"] for t in response.data]
 
 def add_task_type(task_name):
     supabase.table("task_types").insert({"task_name": task_name}).execute()
@@ -110,7 +299,7 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                 "quantity": int(qty),
                 "quantity_done": 0,
                 "remarks": remarks,
-                "updated_at": _now_utc().isoformat()  # keep fresh if column exists
+                "updated_at": _now_utc().isoformat()
             }
 
             ins = supabase.table("tasks").insert(payload).execute()
@@ -137,7 +326,7 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                 if getattr(lookup, "data", None):
                     task_id = lookup.data[0]["id"]
 
-            if not task_id:  # couldn’t resolve; skip attaching details
+            if not task_id:
                 continue
 
             if details_list:
@@ -153,7 +342,8 @@ def assign_task_with_details(users, tasks_with_qty, date_val, deadline, remarks=
                         "description": (d.get("description") or "").strip() or None
                     })
                 if child_rows:
-                    supabase.table("task_details").insert(child_rows).execute()
+                    for chunk in chunk_list(child_rows, 500):
+                        supabase.table("task_details").insert(chunk).execute()
 
 def get_user_tasks(user):
     return supabase.table("tasks").select("*").eq("assigned_to", user).order("date").execute().data
@@ -194,12 +384,14 @@ def add_task_detail_row(task_id, title=None, url=None, keywords=None, descriptio
     supabase.table("task_details").insert(payload).execute()
 
 def delete_task_detail_rows(detail_ids):
-    if not detail_ids: return
+    if not detail_ids:
+        return
     for did in detail_ids:
         supabase.table("task_details").delete().eq("id", did).execute()
 
 def get_task_details_bulk(task_ids):
-    if not task_ids: return []
+    if not task_ids:
+        return []
     return (
         supabase.table("task_details")
         .select("*")
@@ -224,7 +416,7 @@ def get_todos(from_date=None, to_date=None, status=None, created_by=None):
     q = supabase.table("todos").select("*").order("date").order("id")
     if from_date: q = q.gte("date", _to_datestr(from_date))
     if to_date:   q = q.lte("date", _to_datestr(to_date))
-    if status and status in ("Pending","Done"): q = q.eq("status", status)
+    if status and status in ("Pending", "Done"): q = q.eq("status", status)
     if created_by: q = q.eq("created_by", created_by)
     return q.execute().data
 
@@ -232,7 +424,7 @@ def update_todo(todo_id, title=None, notes=None, status=None, date_val=None):
     data = {"updated_at": _now_utc().isoformat()}
     if title is not None: data["title"] = title.strip()
     if notes is not None: data["notes"] = (notes or "").strip()
-    if status in ("Pending","Done"): data["status"] = status
+    if status in ("Pending", "Done"): data["status"] = status
     if date_val is not None: data["date"] = _to_datestr(date_val)
     supabase.table("todos").update(data).eq("id", todo_id).execute()
 
@@ -242,14 +434,9 @@ def delete_todos(todo_ids):
 
 # ---------------- DESKTOP NOTIFICATIONS ----------------
 def show_browser_notifications(messages):
-    """
-    messages: list of {"title": "...", "body": "..."}
-    Uses the Browser Notification API via a tiny HTML/JS payload.
-    """
-    if not messages: return
-    payload = {
-        "messages": messages
-    }
+    if not messages:
+        return
+    payload = {"messages": messages}
     html = f"""
     <script>
       const data = {json.dumps(payload)};
@@ -267,23 +454,16 @@ def show_browser_notifications(messages):
       }})();
     </script>
     """
-    # Height 0 keeps it invisible
     st.components.v1.html(html, height=0)
 
 def poll_for_new_done_events(init=False):
-    """
-    Poll tasks that are Done and notify Admins when a task has newly become Done.
-    - Tracks last seen done IDs & timestamps in session_state.
-    """
     if "done_seen_ids" not in st.session_state:
         st.session_state.done_seen_ids = set()
     if "done_last_check" not in st.session_state:
         st.session_state.done_last_check = _now_utc() - timedelta(minutes=10)
 
-    # Fetch recently updated tasks (last 24h) to keep payload small
     since = (_now_utc() - timedelta(hours=24)).isoformat()
     try:
-        # If updated_at column exists, filter; else fall back to status filter only
         q = supabase.table("tasks").select("*").eq("status", "Done").order("updated_at", desc=True)
         tasks = q.gte("updated_at", since).limit(500).execute().data
     except Exception:
@@ -295,7 +475,6 @@ def poll_for_new_done_events(init=False):
         tid = int(t["id"])
         current_done_ids.add(tid)
         if init:
-            # On first load, seed but don't notify old items
             continue
         if tid not in st.session_state.done_seen_ids:
             who = t.get("assigned_to", "User")
@@ -305,11 +484,9 @@ def poll_for_new_done_events(init=False):
                 "body": f"{who} marked '{task_name}' as Done (#{tid})."
             })
 
-    # Update seen set
     st.session_state.done_seen_ids |= current_done_ids
     st.session_state.done_last_check = _now_utc()
 
-    # Fire notifications if any
     if new_msgs:
         show_browser_notifications(new_msgs)
 
@@ -320,6 +497,7 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.session_state.role = ""
+
 if "details_draft" not in st.session_state:
     st.session_state.details_draft = []
 
@@ -370,7 +548,6 @@ else:
 
     choice = st.sidebar.selectbox("Menu", menu)
 
-    # Seed notification memory once per session to avoid spamming on first render
     if st.session_state.role == "Admin":
         poll_for_new_done_events(init=True)
 
@@ -442,7 +619,7 @@ else:
         st.subheader("Assign Tasks to Users")
 
         users = get_all_users()
-        team_users = [u['username'] for u in users if u['role']=="Team"]
+        team_users = [u["username"] for u in users if u["role"] == "Team"]
         selected_users = st.multiselect("Select Team Members", team_users)
 
         task_types = get_all_task_types()
@@ -451,9 +628,13 @@ else:
         st.markdown("#### Quantities")
         tasks_with_qty = {}
         for task in selected_tasks:
-            tasks_with_qty[task] = st.number_input(f"Quantity for '{task}'", min_value=1, value=1, key=f"qty_{task}")
+            tasks_with_qty[task] = st.number_input(
+                f"Quantity for '{task}'", min_value=1, value=1, key=f"qty_{task}"
+            )
 
         st.markdown("### Optional Task Details (visible to assignee) — add multiple rows")
+
+        # Manual add
         with st.form("detail_add_form"):
             colA, colB = st.columns([1, 1])
             with colA:
@@ -472,16 +653,76 @@ else:
                 })
                 st.success("Detail added to list.")
 
+        # Bulk paste (fixed with callbacks)
+        st.markdown("#### Bulk paste (add many rows at once)")
+        with st.expander("Paste bulk rows (Excel/Sheets/CSV/Pipe/Label format)"):
+            st.caption(
+                "Fastest: paste from Excel/Google Sheets (4 columns): Title, URL, Keywords, Description.\n\n"
+                "Also works:\n"
+                "1) Pipe: Title | URL | Keywords | Description\n"
+                "2) Labeled blocks:\n"
+                "   Title: ...\n   URL: ...\n   Keywords: ...\n   Description: ...\n"
+                "   (blank line separates entries)"
+            )
+
+            TEXT_KEY = "bulk_details_text_admin"
+            OUT = "bulk_admin"
+
+            st.text_area("Paste here", height=180, key=TEXT_KEY)
+
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                st.button(
+                    "Preview parse",
+                    key="bulk_preview_admin",
+                    on_click=_bulk_preview_to_state,
+                    args=(TEXT_KEY, OUT)
+                )
+            with c2:
+                st.button(
+                    "Add to draft",
+                    key="bulk_add_admin",
+                    on_click=_bulk_add_to_draft,
+                    args=(TEXT_KEY, OUT)
+                )
+            with c3:
+                st.button(
+                    "Clear paste box",
+                    key="bulk_clear_admin",
+                    on_click=_clear_text_key,
+                    args=(TEXT_KEY,)
+                )
+
+            errs = st.session_state.get(f"{OUT}_errs") or []
+            if errs:
+                st.warning("\n".join(errs))
+
+            added = st.session_state.get(f"{OUT}_added")
+            if isinstance(added, int) and added > 0:
+                st.success(f"Added {added} rows to draft.")
+                st.session_state[f"{OUT}_added"] = 0
+
+            preview = st.session_state.get(f"{OUT}_preview") or []
+            if preview:
+                st.dataframe(pd.DataFrame(preview), use_container_width=True)
+
+        # Draft table + bulk remove
         if st.session_state.details_draft:
             st.markdown("**Draft Details:**")
-            for i, d in enumerate(st.session_state.details_draft):
-                with st.expander(f"Detail #{i+1}: {d.get('title') or '(no title)'}"):
-                    st.write(f"**URL:** {d.get('url','')}")
-                    st.write(f"**Keywords:** {d.get('keywords','')}")
-                    st.write(f"**Description:** {d.get('description','')}")
-                    if st.button("Remove this detail", key=f"remove_detail_{i}"):
-                        st.session_state.details_draft.pop(i)
-                        _rerun()
+            draft_df = pd.DataFrame(st.session_state.details_draft)
+            st.dataframe(draft_df, use_container_width=True)
+
+            idx_options = list(range(len(draft_df)))
+            to_remove = st.multiselect(
+                "Select rows to remove",
+                options=idx_options,
+                format_func=lambda i: f"{i+1}. {(draft_df.loc[i,'title'] or '(no title)')[:60]}",
+                key="draft_remove_idx"
+            )
+            if st.button("Remove selected rows", key="draft_remove_btn"):
+                keep = [r for j, r in enumerate(st.session_state.details_draft) if j not in set(to_remove)]
+                st.session_state.details_draft = keep
+                _rerun()
 
         st.divider()
         remarks = st.text_input("Remarks", "")
@@ -517,36 +758,12 @@ else:
     elif choice == "Task Management" and st.session_state.role == "Admin":
         st.subheader("View/Edit/Delete Assigned Tasks")
 
-        # Auto-poll every 15s to catch new Done events and notify
-        st_autorefresh_key = "poll_tasks_done"
-        st.experimental_memo.clear() if False else None  # placeholder to calm linters
-        st_autorefresh = st.experimental_rerun if False else None  # placeholder
-
-        # Use Streamlit native autorefresh if available
-        try:
-            st_autorefresh = st.experimental_singleton  # just to test attribute
-            st_autorefresh = None
-        except Exception:
-            st_autorefresh = None
-        try:
-            # Streamlit provides st.runtime.legacy_caching? Avoid. Use built-in helper:
-            from streamlit.runtime.scriptrunner import add_script_run_ctx  # noqa: F401
-        except Exception:
-            pass
-        # Real refresh:
-        try:
-            st_autorefresh_func = st.experimental_rerun
-        except Exception:
-            st_autorefresh_func = None
-        # Use the official helper:
         try:
             from streamlit_autorefresh import st_autorefresh as auto
             auto(interval=15000, key="auto_poll_done")
         except Exception:
-            # Fallback: small manual interval prompt (no-op)
             pass
 
-        # Poll + notify (non-initial)
         poll_for_new_done_events(init=False)
 
         tasks = get_all_tasks()
@@ -572,7 +789,11 @@ else:
                     task_types = get_all_task_types()
                     users = get_all_users()
                     new_task_name = st.selectbox("Task Name", task_types, key="adm_edit_task_name")
-                    new_assigned_to = st.selectbox("Assigned To", [u['username'] for u in users if u['role']=="Team"], key="adm_edit_assigned_to")
+                    new_assigned_to = st.selectbox(
+                        "Assigned To",
+                        [u["username"] for u in users if u["role"] == "Team"],
+                        key="adm_edit_assigned_to"
+                    )
                     new_status = st.selectbox("Status", ["Pending", "Half", "Done"], key="adm_edit_status")
                     new_remarks = st.text_input("Remarks", key="adm_edit_remarks")
                     new_quantity = st.number_input("Quantity", min_value=1, value=1, key="adm_edit_qty")
@@ -605,7 +826,7 @@ else:
                                 st.write(f"**Keywords:** {d.get('keywords','')}")
                                 st.write(f"**Description:** {d.get('description','')}")
                                 if st.checkbox(f"Mark for delete #{d['id']}", key=f"del_detail_{d['id']}"):
-                                    del_ids.append(d['id'])
+                                    del_ids.append(d["id"])
                         if st.button("Delete Selected Details"):
                             delete_task_detail_rows(del_ids)
                             st.success("Selected details deleted.")
@@ -622,6 +843,50 @@ else:
                         add_task_detail_row(task_id, nd_title, nd_url, nd_keywords, nd_description)
                         st.success("Detail row added.")
                         _rerun()
+
+                    # Bulk paste into existing task (fixed with callbacks)
+                    st.markdown("#### Bulk paste details into this task")
+                    with st.expander("Bulk add to this task"):
+                        TEXT_KEY = f"bulk_task_{task_id}"
+                        OUT = f"bulk_task_out_{task_id}"
+
+                        st.text_area("Paste here", height=160, key=TEXT_KEY)
+
+                        cc1, cc2, cc3 = st.columns([1, 1, 1])
+                        with cc1:
+                            st.button(
+                                "Preview parse",
+                                key=f"bulk_prev_{task_id}",
+                                on_click=_bulk_preview_to_state,
+                                args=(TEXT_KEY, OUT)
+                            )
+                        with cc2:
+                            st.button(
+                                "Insert into task",
+                                key=f"bulk_ins_{task_id}",
+                                on_click=_bulk_insert_into_task,
+                                args=(task_id, TEXT_KEY, OUT)
+                            )
+                        with cc3:
+                            st.button(
+                                "Clear paste box",
+                                key=f"bulk_clear_{task_id}",
+                                on_click=_clear_text_key,
+                                args=(TEXT_KEY,)
+                            )
+
+                        errs = st.session_state.get(f"{OUT}_errs") or []
+                        if errs:
+                            st.warning("\n".join(errs))
+
+                        added = st.session_state.get(f"{OUT}_added")
+                        if isinstance(added, int) and added > 0:
+                            st.success(f"Inserted {added} rows into task #{task_id}.")
+                            st.session_state[f"{OUT}_added"] = 0
+
+                        preview = st.session_state.get(f"{OUT}_preview") or []
+                        if preview:
+                            st.dataframe(pd.DataFrame(preview), use_container_width=True)
         else:
             st.info("No tasks found.")
 
@@ -647,7 +912,7 @@ else:
 
         st.divider()
         st.markdown("### Future Plan (Date-wise)")
-        colf1, colf2, colf3 = st.columns([1,1,1])
+        colf1, colf2, colf3 = st.columns([1, 1, 1])
         with colf1:
             from_dt = st.date_input("From", value=date.today())
         with colf2:
@@ -663,16 +928,19 @@ else:
         else:
             df = pd.DataFrame(rows)
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            # Group by date
-            for dt, g in df.sort_values(["date","id"]).groupby(df["date"].dt.date):
-                st.markdown(f"#### {dt.strftime('%d %b %Y')}")
+            for dt_, g in df.sort_values(["date", "id"]).groupby(df["date"].dt.date):
+                st.markdown(f"#### {dt_.strftime('%d %b %Y')}")
                 for _, r in g.iterrows():
                     with st.expander(f"#{r['id']} • {r['title']} • {r['status']}"):
                         new_title = st.text_input("Title", value=r["title"], key=f"todo_title_{r['id']}")
                         new_notes = st.text_area("Notes", value=r.get("notes") or "", key=f"todo_notes_{r['id']}")
                         new_date = st.date_input("Date", value=r["date"].date(), key=f"todo_date_{r['id']}")
-                        new_status = st.selectbox("Status", ["Pending","Done"], index=(0 if r['status']=="Pending" else 1), key=f"todo_status_{r['id']}")
-                        c1, c2 = st.columns([1,1])
+                        new_status = st.selectbox(
+                            "Status", ["Pending", "Done"],
+                            index=(0 if r["status"] == "Pending" else 1),
+                            key=f"todo_status_{r['id']}"
+                        )
+                        c1, c2 = st.columns([1, 1])
                         with c1:
                             if st.button("Save", key=f"todo_save_{r['id']}"):
                                 update_todo(int(r["id"]), title=new_title, notes=new_notes, date_val=new_date, status=new_status)
@@ -691,23 +959,22 @@ else:
         if tasks:
             df = pd.DataFrame(tasks)
 
-            # normalize / derive
             for col in ["date", "deadline"]:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], errors="coerce")
+
             if "quantity_done" not in df.columns:
                 df["quantity_done"] = 0
             if "quantity" not in df.columns:
                 df["quantity"] = 1
 
             df["completed_units"] = df["quantity_done"].astype(int)
-            df["assigned_units"]  = df["quantity"].astype(int)
+            df["assigned_units"] = df["quantity"].astype(int)
             df["remaining_units"] = (df["assigned_units"] - df["completed_units"]).clip(lower=0).astype(int)
             df["status"] = df["status"].fillna("Pending")
             df["is_done"] = df["status"].eq("Done")
-            df["needs_attention"] = (df["remaining_units"] > 0) | (~df["is_done"])
 
-            user_filter = st.selectbox("Filter by User", ["All"] + [u['username'] for u in get_all_users()])
+            user_filter = st.selectbox("Filter by User", ["All"] + [u["username"] for u in get_all_users()])
 
             col_f1, col_f2 = st.columns([1, 2])
             with col_f1:
@@ -715,7 +982,7 @@ else:
 
             filtered_df = df.copy()
             if user_filter != "All":
-                filtered_df = filtered_df[filtered_df['assigned_to'] == user_filter]
+                filtered_df = filtered_df[filtered_df["assigned_to"] == user_filter]
 
             def _month_label(p):
                 return p.strftime("%B %Y")
@@ -741,7 +1008,6 @@ else:
                         st.info("No month data available.")
                         filtered_df = filtered_df.iloc[0:0]
 
-            # Bring detail columns
             if not filtered_df.empty:
                 task_ids = filtered_df["id"].astype(int).tolist()
                 detail_rows = get_task_details_bulk(task_ids)
@@ -757,32 +1023,18 @@ else:
                 filtered_df["detail_urls"] = filtered_df["id"].map(lambda tid: "\n".join([u for u in urls_map.get(int(tid), []) if u]))
                 filtered_df["detail_keywords"] = filtered_df["id"].map(lambda tid: "\n".join([k for k in keywords_map.get(int(tid), []) if k]))
 
-            # KPIs
             if not filtered_df.empty:
-                total_assigned_tasks = len(filtered_df)
-                total_done_tasks = int((filtered_df["status"] == "Done").sum())
-                total_pending_tasks = int((filtered_df["status"] == "Pending").sum())
-                total_half_tasks = int((filtered_df["status"] == "Half").sum())
-
                 colk1, colk2, colk3, colk4 = st.columns(4)
-                colk1.metric("Total Assigned Tasks", total_assigned_tasks)
-                colk2.metric("Total Done Tasks", total_done_tasks)
-                colk3.metric("Total Pending Tasks", total_pending_tasks)
-                colk4.metric("Half (In Progress)", total_half_tasks)
-
-                colu1, colu2, colu3, colu4 = st.columns(4)
-                colu1.metric("Assigned Units", int(filtered_df["quantity"].sum()))
-                colu2.metric("Completed Units", int(filtered_df["quantity_done"].sum()))
-                colu3.metric("Remaining Units", int((filtered_df["quantity"] - filtered_df["quantity_done"]).clip(lower=0).sum()))
-                colu4.metric("Needs Attention (tasks)", int(((filtered_df["quantity"] - filtered_df["quantity_done"]) > 0).sum()))
-            else:
-                st.info("No data for the selected filter.")
+                colk1.metric("Total Assigned Tasks", int(len(filtered_df)))
+                colk2.metric("Total Done Tasks", int((filtered_df["status"] == "Done").sum()))
+                colk3.metric("Total Pending Tasks", int((filtered_df["status"] == "Pending").sum()))
+                colk4.metric("Half (In Progress)", int((filtered_df["status"] == "Half").sum()))
 
             display_cols = [
-                "id","task","assigned_to","status",
-                "quantity","quantity_done",
-                "date","deadline","remarks",
-                "detail_titles","detail_urls","detail_keywords"
+                "id", "task", "assigned_to", "status",
+                "quantity", "quantity_done",
+                "date", "deadline", "remarks",
+                "detail_titles", "detail_urls", "detail_keywords"
             ]
             show_df = filtered_df[display_cols] if not filtered_df.empty else filtered_df
 
@@ -801,13 +1053,17 @@ else:
             if not filtered_df.empty:
                 agg_units = (
                     filtered_df
-                    .groupby("assigned_to", as_index=False)[["quantity_done","quantity"]]
+                    .groupby("assigned_to", as_index=False)[["quantity_done", "quantity"]]
                     .sum()
-                    .rename(columns={"quantity_done":"completed_units","quantity":"assigned_units"})
+                    .rename(columns={"quantity_done": "completed_units", "quantity": "assigned_units"})
                 )
                 agg_units["remaining_units"] = (agg_units["assigned_units"] - agg_units["completed_units"]).clip(lower=0)
-                agg_melt = agg_units.melt(id_vars="assigned_to", value_vars=["completed_units","remaining_units"],
-                                          var_name="Metric", value_name="Units")
+                agg_melt = agg_units.melt(
+                    id_vars="assigned_to",
+                    value_vars=["completed_units", "remaining_units"],
+                    var_name="Metric",
+                    value_name="Units"
+                )
                 fig = px.bar(agg_melt, x="assigned_to", y="Units", color="Metric", barmode="stack",
                              title="Completed vs Remaining Units by User")
                 st.plotly_chart(fig, use_container_width=True)
@@ -824,8 +1080,8 @@ else:
 
         my_tasks = get_user_tasks(st.session_state.username)
         df = pd.DataFrame(my_tasks) if my_tasks else pd.DataFrame(columns=[
-            "id","task","status","remarks","quantity","quantity_done","date","deadline",
-            "title","url","keywords","description"
+            "id", "task", "status", "remarks", "quantity", "quantity_done", "date", "deadline",
+            "title", "url", "keywords", "description"
         ])
 
         if df.empty:
@@ -842,12 +1098,12 @@ else:
             pending_now = df[df["status"].fillna("Pending") != "Done"]
             if not pending_now.empty:
                 st.sidebar.markdown("### Pending Tasks")
-                for _, r in pending_now.sort_values(by=["deadline","date","id"]).iterrows():
+                for _, r in pending_now.sort_values(by=["deadline", "date", "id"]).iterrows():
                     label = f"#{r['id']} • {r.get('task','')}"
                     st.sidebar.markdown(f":red[{label}]")
 
             st.markdown("#### Filters")
-            col_vm1, col_vm2 = st.columns([1,1])
+            col_vm1, col_vm2 = st.columns([1, 1])
             with col_vm1:
                 view_mode = st.radio("View by", ["Date", "Month"], horizontal=True)
             with col_vm2:
@@ -870,7 +1126,7 @@ else:
                     header = f"#{row['id']} • {row.get('task','(no task)')} • {row.get('status','')}"
                     with st.expander(header):
                         total_q = int(row.get("quantity", 1))
-                        done_q  = int(row.get("quantity_done", 0))
+                        done_q = int(row.get("quantity_done", 0))
                         remain_q = max(0, total_q - done_q)
 
                         st.markdown(f"**Task:** {row.get('task','')}")
@@ -881,7 +1137,10 @@ else:
                         st.markdown(f"**Deadline:** {row['deadline'].date() if pd.notna(row['deadline']) else ''}")
                         st.markdown("---")
 
-                        legacy_has_any = any([bool(row.get("title")), bool(row.get("url")), bool(row.get("keywords")), bool(row.get("description"))])
+                        legacy_has_any = any([
+                            bool(row.get("title")), bool(row.get("url")),
+                            bool(row.get("keywords")), bool(row.get("description"))
+                        ])
                         if legacy_has_any:
                             legacy_rows = [{
                                 "Title": row.get("title") or "",
@@ -911,12 +1170,19 @@ else:
                         st.markdown("---")
                         max_qty = total_q
                         current_done = done_q
-                        new_done = st.number_input("Update completed units", min_value=0, max_value=max_qty, value=current_done, step=1, key=f"done_{row['id']}")
+                        new_done = st.number_input(
+                            "Update completed units",
+                            min_value=0, max_value=max_qty,
+                            value=current_done, step=1,
+                            key=f"done_{row['id']}"
+                        )
 
-                        suggested_status = _status_from_progress(int(new_done), int(max_qty), row.get("status","Pending"))
+                        suggested_status = _status_from_progress(int(new_done), int(max_qty), row.get("status", "Pending"))
                         new_status = st.selectbox(
                             "Update Status", ["Pending", "Half", "Done"],
-                            index=["Pending","Half","Done"].index(suggested_status if suggested_status in ["Pending","Half","Done"] else "Pending"),
+                            index=["Pending", "Half", "Done"].index(
+                                suggested_status if suggested_status in ["Pending", "Half", "Done"] else "Pending"
+                            ),
                             key=f"status_{row['id']}"
                         )
                         new_remarks = st.text_area("Remarks", value=row.get("remarks") or "", key=f"remarks_{row['id']}")
@@ -960,15 +1226,19 @@ else:
         else:
             df = pd.DataFrame(rows)
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            for dt, g in df.sort_values(["date","id"]).groupby(df["date"].dt.date):
-                st.markdown(f"#### {dt.strftime('%d %b %Y')}")
+            for dt_, g in df.sort_values(["date", "id"]).groupby(df["date"].dt.date):
+                st.markdown(f"#### {dt_.strftime('%d %b %Y')}")
                 for _, r in g.iterrows():
                     with st.expander(f"#{r['id']} • {r['title']} • {r['status']}"):
                         new_title = st.text_input("Title", value=r["title"], key=f"mytodo_title_{r['id']}")
                         new_notes = st.text_area("Notes", value=r.get("notes") or "", key=f"mytodo_notes_{r['id']}")
                         new_date = st.date_input("Date", value=r["date"].date(), key=f"mytodo_date_{r['id']}")
-                        new_status = st.selectbox("Status", ["Pending","Done"], index=(0 if r['status']=="Pending" else 1), key=f"mytodo_status_{r['id']}")
-                        c1, c2 = st.columns([1,1])
+                        new_status = st.selectbox(
+                            "Status", ["Pending", "Done"],
+                            index=(0 if r["status"] == "Pending" else 1),
+                            key=f"mytodo_status_{r['id']}"
+                        )
+                        c1, c2 = st.columns([1, 1])
                         with c1:
                             if st.button("Save", key=f"mytodo_save_{r['id']}"):
                                 update_todo(int(r["id"]), title=new_title, notes=new_notes, date_val=new_date, status=new_status)
