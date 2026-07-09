@@ -11,6 +11,7 @@ import json
 import csv
 import io
 import re
+from zoneinfo import ZoneInfo
 
 
 # ---------------- PAGE & CLIENT ----------------
@@ -698,6 +699,76 @@ def poll_for_new_done_events(init=False):
         show_browser_notifications(new_msgs)
 
 
+# ---------------- DAILY SUMMARY (Date-wise, per team member) ----------------
+IST = ZoneInfo("Asia/Kolkata")
+
+def _now_ist():
+    from datetime import datetime
+    return datetime.now(IST)
+
+def get_daily_task_summary(target_date: date):
+    """
+    For the given date, returns per-user counts of:
+      - assigned: how many tasks were assigned on that date
+      - closed: how many of those are marked Done
+    """
+    date_str = _date_to_ymd(target_date)
+    rows = (
+        supabase.table("tasks")
+        .select("assigned_to, status")
+        .eq("date", date_str)
+        .execute()
+        .data
+    ) or []
+
+    summary = {}
+    for r in rows:
+        user = r.get("assigned_to") or "Unassigned"
+        summary.setdefault(user, {"assigned": 0, "closed": 0})
+        summary[user]["assigned"] += 1
+        if r.get("status") == "Done":
+            summary[user]["closed"] += 1
+
+    out = [
+        {"user": u, "assigned": v["assigned"], "closed": v["closed"], "pending": v["assigned"] - v["closed"]}
+        for u, v in summary.items()
+    ]
+    out.sort(key=lambda x: x["user"])
+    return out
+
+def build_summary_notification(target_date: date):
+    rows = get_daily_task_summary(target_date)
+    if not rows:
+        return None
+    date_label = target_date.strftime("%d %b %Y")
+    lines = [f"{r['user']}: {r['closed']}/{r['assigned']} closed" for r in rows]
+    body = "\n".join(lines)
+    return {"title": f"Daily Task Summary - {date_label}", "body": body}
+
+def maybe_auto_send_daily_summary():
+    """
+    Checks the current time in IST. Once it's 9:15 AM or later, sends the
+    day's date-wise summary notification once (per browser session/day).
+    Requires this tab to be open (with auto-refresh) around that time.
+    """
+    if st.session_state.get("auto_summary_enabled", True) is False:
+        return
+
+    now = _now_ist()
+    today_str = now.strftime("%Y-%m-%d")
+
+    if (now.hour, now.minute) < (9, 15):
+        return
+
+    if st.session_state.get("daily_summary_sent_for") == today_str:
+        return
+
+    msg = build_summary_notification(now.date())
+    if msg:
+        show_browser_notifications([msg])
+    st.session_state["daily_summary_sent_for"] = today_str
+
+
 # ---------------- STATE ----------------
 st.title("📋 Advanced CRM - Task Manager")
 
@@ -761,6 +832,7 @@ else:
             "Reports",
             "Monthly Targets",
             "Data Cleanup",
+            "Notifications",
         ]
     else:
         menu = ["My Tasks", "My To-Do"]
@@ -768,7 +840,22 @@ else:
     choice = st.sidebar.selectbox("Menu", menu)
 
     if st.session_state.role == "Admin":
-        poll_for_new_done_events(init=True)
+        # Keep the app quietly refreshing in the background so the 9:15 AM
+        # summary and "task closed" alerts can fire even if the Admin is
+        # sitting on a different page (tab must stay open in the browser).
+        try:
+            from streamlit_autorefresh import st_autorefresh as auto
+            auto(interval=20000, key="admin_global_autorefresh")
+        except Exception:
+            pass
+
+        if "admin_polling_started" not in st.session_state:
+            poll_for_new_done_events(init=True)
+            st.session_state.admin_polling_started = True
+        else:
+            poll_for_new_done_events(init=False)
+
+        maybe_auto_send_daily_summary()
 
     # ---------- USER MANAGEMENT (Admin) ----------
     if choice == "User Management" and st.session_state.role == "Admin":
@@ -1072,14 +1159,6 @@ else:
     # ---------- TASK MANAGEMENT (Admin) ----------
     elif choice == "Task Management" and st.session_state.role == "Admin":
         st.subheader("View/Edit/Delete Assigned Tasks")
-
-        try:
-            from streamlit_autorefresh import st_autorefresh as auto
-            auto(interval=15000, key="auto_poll_done")
-        except Exception:
-            pass
-
-        poll_for_new_done_events(init=False)
 
         tasks = get_all_tasks()
         if tasks:
@@ -1489,6 +1568,54 @@ else:
 
                 st.success("Deleted successfully.")
                 _rerun()
+
+    # ---------- NOTIFICATIONS (Admin) ----------
+    elif choice == "Notifications" and st.session_state.role == "Admin":
+        st.subheader("Notifications")
+
+        st.markdown("### Automatic Daily Summary (9:15 AM)")
+        st.checkbox(
+            "Enable automatic desktop summary at 9:15 AM",
+            value=st.session_state.get("auto_summary_enabled", True),
+            key="auto_summary_enabled"
+        )
+        st.caption(
+            "This tab needs to be open in your browser around 9:15 AM (IST) for the desktop "
+            "notification to pop up — it refreshes itself quietly in the background to check the time."
+        )
+
+        st.divider()
+        st.markdown("### Send It Manually")
+        pick_date = st.date_input("Date", value=date.today(), key="notif_pick_date")
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🔔 Show Desktop Notification Now"):
+                msg = build_summary_notification(pick_date)
+                if msg:
+                    show_browser_notifications([msg])
+                    st.success("Notification sent — check your browser/desktop.")
+                else:
+                    st.info("No tasks were assigned on that date.")
+        with col2:
+            if st.button("Refresh Table"):
+                _rerun()
+
+        st.divider()
+        st.markdown(f"### Summary — {pick_date.strftime('%d %b %Y')}")
+        rows = get_daily_task_summary(pick_date)
+        if not rows:
+            st.info("No tasks assigned on this date.")
+        else:
+            df_sum = pd.DataFrame(rows).rename(
+                columns={"user": "Team Member", "assigned": "Assigned", "closed": "Closed", "pending": "Pending"}
+            )
+            df_show(df_sum[["Team Member", "Assigned", "Closed", "Pending"]].sort_values("Team Member"))
+
+            t1, t2, t3 = st.columns(3)
+            t1.metric("Total Assigned", int(df_sum["Assigned"].sum()))
+            t2.metric("Total Closed", int(df_sum["Closed"].sum()))
+            t3.metric("Total Pending", int(df_sum["Pending"].sum()))
 
     # ---------- MY TASKS (Team) ----------
     elif choice == "My Tasks" and st.session_state.role != "Admin":
