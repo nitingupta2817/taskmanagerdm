@@ -661,27 +661,8 @@ def delete_targets_by_range(start_month_dt: date, end_month_exclusive_dt: date, 
 
 # ---------------- DESKTOP NOTIFICATIONS ----------------
 def show_browser_notifications(messages):
-    if not messages:
-        return
-    payload = {"messages": messages}
-    html = f"""
-    <script>
-      const data = {json.dumps(payload)};
-      (async () => {{
-        if (!("Notification" in window)) return;
-        let perm = Notification.permission;
-        try {{
-          if (perm !== "granted") perm = await Notification.requestPermission();
-        }} catch (e) {{}}
-        if (perm === "granted") {{
-          data.messages.forEach((m, i) => {{
-            setTimeout(() => new Notification(m.title, {{ body: m.body }}), i * 400);
-          }});
-        }}
-      }})();
-    </script>
-    """
-    st.iframe(html, width="stretch", height=1)
+    # Temporarily disabled while diagnosing server crashes.
+    return
 
 def poll_for_new_done_events(init=False):
     if "done_seen_ids" not in st.session_state:
