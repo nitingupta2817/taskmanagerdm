@@ -18,9 +18,21 @@ from zoneinfo import ZoneInfo
 st.set_page_config(page_title="Advanced CRM - Task Manager", page_icon="📋", layout="wide")
 
 # TIP: Move these to Streamlit secrets in production
-SUPABASE_URL = "https://fijvjhbhxdbinqdiiytq.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpanZqaGJoeGRiaW5xZGlpeXRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MTU5OTksImV4cCI6MjA3MzQ5MTk5OX0.aR5Sl9Z9wnCMQhRwHJ6dEXwAWTnxn-yxDqomL9KEHag"
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Store these values in .streamlit/secrets.toml in production.
+SUPABASE_URL = st.secrets.get(
+    "SUPABASE_URL",
+    "https://fijvjhbhxdbinqdiiytq.supabase.co",
+)
+SUPABASE_KEY = st.secrets.get(
+    "SUPABASE_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpanZqaGJoeGRiaW5xZGlpeXRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MTU5OTksImV4cCI6MjA3MzQ5MTk5OX0.aR5Sl9Z9wnCMQhRwHJ6dEXwAWTnxn-yxDqomL9KEHag",
+)
+
+@st.cache_resource
+def get_supabase_client():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+supabase = get_supabase_client()
 
 try:
     _rerun = st.rerun
@@ -42,7 +54,7 @@ DEFAULT_TASK_TYPES = [
 
 # ---------------- UTIL ----------------
 def df_show(df: pd.DataFrame):
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
 def _to_datestr(d):
     return d if isinstance(d, str) else d.strftime("%Y-%m-%d")
@@ -669,7 +681,7 @@ def show_browser_notifications(messages):
       }})();
     </script>
     """
-    st.components.v1.html(html, height=0)
+    st.iframe(html, width="stretch", height=1)
 
 def poll_for_new_done_events(init=False):
     if "done_seen_ids" not in st.session_state:
@@ -845,7 +857,7 @@ else:
         # sitting on a different page (tab must stay open in the browser).
         try:
             from streamlit_autorefresh import st_autorefresh as auto
-            auto(interval=20000, key="admin_global_autorefresh")
+            auto(interval=60000, key="admin_global_autorefresh")
         except Exception:
             pass
 
@@ -1502,11 +1514,11 @@ else:
         )
         fig = px.bar(agg_melt, x="assigned_to", y="Units", color="Metric", barmode="stack",
                      title="Completed vs Remaining Units by User")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         count_by_status = filtered_df.groupby("status", as_index=False)["id"].count().rename(columns={"id": "Tasks"})
         fig2 = px.bar(count_by_status, x="status", y="Tasks", title="Task Count by Status (Selected Period)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     # ---------- DATA CLEANUP (Admin) ----------
     elif choice == "Data Cleanup" and st.session_state.role == "Admin":
