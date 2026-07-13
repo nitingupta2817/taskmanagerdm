@@ -852,22 +852,15 @@ else:
     choice = st.sidebar.selectbox("Menu", menu)
 
     if st.session_state.role == "Admin":
-        # Keep the app quietly refreshing in the background so the 9:15 AM
-        # summary and "task closed" alerts can fire even if the Admin is
-        # sitting on a different page (tab must stay open in the browser).
-        try:
-            from streamlit_autorefresh import st_autorefresh as auto
-            auto(interval=60000, key="admin_global_autorefresh")
-        except Exception:
-            pass
-
+        # Automatic full-app refresh is intentionally disabled.
+        # Streamlit already reruns after widget interactions, and an additional
+        # timed rerun can interrupt database writes on Community Cloud.
         if "admin_polling_started" not in st.session_state:
-            poll_for_new_done_events(init=True)
+            try:
+                poll_for_new_done_events(init=True)
+            except Exception:
+                pass
             st.session_state.admin_polling_started = True
-        else:
-            poll_for_new_done_events(init=False)
-
-        maybe_auto_send_daily_summary()
 
     # ---------- USER MANAGEMENT (Admin) ----------
     if choice == "User Management" and st.session_state.role == "Admin":
@@ -1147,21 +1140,28 @@ else:
 
         col_btn1, col_btn2 = st.columns([1, 1])
         with col_btn1:
-            if st.button("Add Task"):
-                if project and selected_users and tasks_with_qty:
-                    assign_task_with_details(
-                        project,
-                        selected_users,
-                        tasks_with_qty,
-                        _to_datestr(date_val),
-                        _to_datestr(deadline),
-                        remarks,
-                        details_list=st.session_state.details_draft
-                    )
-                    st.success("Tasks assigned!")
-                    st.session_state.details_draft = []
+            if st.button("Add Task", type="primary"):
+                if not project:
+                    st.warning("Select a project.")
+                elif not selected_users:
+                    st.warning("Select at least one team member.")
+                elif not tasks_with_qty:
+                    st.warning("Select at least one task.")
                 else:
-                    st.warning("Select project, at least one user, and at least one task.")
+                    try:
+                        assign_task_with_details(
+                            project=project,
+                            users=selected_users,
+                            tasks_with_qty=tasks_with_qty,
+                            date_val=date_val,
+                            deadline=deadline,
+                            remarks=remarks,
+                            details_list=st.session_state.details_draft
+                        )
+                        st.session_state.details_draft = []
+                        st.success("Tasks assigned successfully.")
+                    except Exception as exc:
+                        st.error(f"Task could not be saved: {exc}")
 
         with col_btn2:
             if st.button("Clear Details List"):
@@ -1301,8 +1301,17 @@ else:
                 if not title.strip():
                     st.error("Title is required.")
                 else:
-                    add_todo(todo_date, title, notes, created_by=st.session_state.username, status=status)
-                    st.success("To-Do added.")
+                    try:
+                        add_todo(
+                            todo_date,
+                            title,
+                            notes,
+                            created_by=st.session_state.username,
+                            status=status
+                        )
+                        st.success("To-Do added.")
+                    except Exception as exc:
+                        st.error(f"To-Do could not be saved: {exc}")
 
         st.divider()
         st.markdown("### Future Plan (Date-wise)")
@@ -1746,8 +1755,17 @@ else:
                 if not title.strip():
                     st.error("Title is required.")
                 else:
-                    add_todo(todo_date, title, notes, created_by=st.session_state.username, status=status)
-                    st.success("To-Do added.")
+                    try:
+                        add_todo(
+                            todo_date,
+                            title,
+                            notes,
+                            created_by=st.session_state.username,
+                            status=status
+                        )
+                        st.success("To-Do added.")
+                    except Exception as exc:
+                        st.error(f"To-Do could not be saved: {exc}")
 
         st.divider()
         st.markdown("### Upcoming (Date-wise)")
