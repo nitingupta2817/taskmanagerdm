@@ -12,6 +12,7 @@ import csv
 import io
 import re
 from zoneinfo import ZoneInfo
+from streamlit_cookies_manager import EncryptedCookieManager
 
 
 # ---------------- PAGE & CLIENT ----------------
@@ -19,11 +20,22 @@ st.set_page_config(page_title="Advanced CRM - Task Manager", page_icon="📋", l
 
 # TIP: Move these to Streamlit secrets in production
 # Store these values in .streamlit/secrets.toml in production.
-SUPABASE_URL = st.secrets.get(
+def safe_secret(key: str, default: str) -> str:
+    """
+    st.secrets.get(key, default) still raises StreamlitSecretNotFoundError
+    on newer Streamlit versions when no secrets.toml file exists at all.
+    This wrapper falls back to `default` in that case instead of crashing.
+    """
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+SUPABASE_URL = safe_secret(
     "SUPABASE_URL",
     "https://fijvjhbhxdbinqdiiytq.supabase.co",
 )
-SUPABASE_KEY = st.secrets.get(
+SUPABASE_KEY = safe_secret(
     "SUPABASE_KEY",
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpanZqaGJoeGRiaW5xZGlpeXRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MTU5OTksImV4cCI6MjA3MzQ5MTk5OX0.aR5Sl9Z9wnCMQhRwHJ6dEXwAWTnxn-yxDqomL9KEHag",
 )
@@ -38,6 +50,18 @@ try:
     _rerun = st.rerun
 except AttributeError:
     _rerun = st.experimental_rerun
+
+
+# ---------------- PERSISTENT LOGIN (COOKIES) ----------------
+# Keeps the user logged in across browser refreshes / re-opens of the tab,
+# until they click Logout. Uses a signed+encrypted browser cookie, so nothing
+# sensitive (like the password) is ever stored — only username + role.
+COOKIE_PASSWORD = safe_secret("COOKIES_PASSWORD", "change-this-to-a-long-random-secret")
+
+cookies = EncryptedCookieManager(prefix="crm_app_", password=COOKIE_PASSWORD)
+if not cookies.ready():
+    # The component needs one extra run to sync cookies from the browser.
+    st.stop()
 
 
 # ---------------- DEFAULT TASK TYPES ----------------
@@ -766,9 +790,26 @@ def maybe_auto_send_daily_summary():
 st.title("📋 Advanced CRM - Task Manager")
 
 if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.username = ""
-    st.session_state.role = ""
+    # First, try to restore the session from the browser cookie so a page
+    # refresh / re-opened tab doesn't force a fresh login.
+    cookie_user = (cookies.get("username") or "").strip()
+    cookie_role = (cookies.get("role") or "").strip()
+
+    if cookie_user and cookie_role:
+        # Re-validate against the DB so a deleted/renamed user can't stay "logged in".
+        existing = supabase.table("users").select("*").eq("username", cookie_user).eq("role", cookie_role).execute()
+        if existing.data:
+            st.session_state.logged_in = True
+            st.session_state.username = cookie_user
+            st.session_state.role = cookie_role
+        else:
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.session_state.role = ""
+    else:
+        st.session_state.logged_in = False
+        st.session_state.username = ""
+        st.session_state.role = ""
 
 if "details_draft" not in st.session_state:
     st.session_state.details_draft = []
@@ -801,6 +842,13 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.username = user["username"]
                 st.session_state.role = user["role"]
+
+                # Persist login in a browser cookie so it survives refreshes
+                # and re-opening the tab, until the user logs out manually.
+                cookies["username"] = user["username"]
+                cookies["role"] = user["role"]
+                cookies.save()
+
                 _rerun()
             else:
                 st.error("Invalid credentials")
@@ -813,6 +861,12 @@ else:
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.role = ""
+
+        # Clear the persistent-login cookie so a refresh doesn't log back in.
+        cookies["username"] = ""
+        cookies["role"] = ""
+        cookies.save()
+
         _rerun()
 
     if st.session_state.role == "Admin":
@@ -1029,10 +1083,10 @@ else:
 
         users = get_all_users()
         team_users = [u["username"] for u in users if u["role"] == "Team"]
-        selected_users = st.multiselect("Select Team Members", team_users)
+        selected_users = st.multiselect("Select Team Members", team_users, key="assign_users")
 
         task_types = get_all_task_types()
-        selected_tasks = st.multiselect("Select Tasks", task_types)
+        selected_tasks = st.multiselect("Select Tasks", task_types, key="assign_tasks")
 
         st.markdown("#### Quantities")
         tasks_with_qty = {}
@@ -1112,12 +1166,12 @@ else:
                 _rerun()
 
         st.divider()
-        remarks = st.text_input("Remarks", "")
+        remarks = st.text_input("Remarks", "", key="assign_remarks")
         colD, colE = st.columns(2)
         with colD:
-            date_val = st.date_input("Task Date", value=date.today())
+            date_val = st.date_input("Task Date", value=date.today(), key="assign_date")
         with colE:
-            deadline = st.date_input("Deadline", value=date.today())
+            deadline = st.date_input("Deadline", value=date.today(), key="assign_deadline")
 
         col_btn1, col_btn2 = st.columns([1, 1])
         with col_btn1:
@@ -1141,6 +1195,20 @@ else:
                         )
                         st.session_state.details_draft = []
                         st.success("Tasks assigned successfully.")
+
+                        # "Close the window" -> reset the Add New Task form back to a
+                        # clean/blank state so it behaves like it closed after saving.
+                        for k in [
+                            "assign_project", "assign_users", "assign_tasks",
+                            "assign_remarks", "assign_date", "assign_deadline",
+                            "bulk_details_text_admin", "bulk_admin_preview",
+                            "bulk_admin_errs", "bulk_admin_added", "draft_remove_idx",
+                        ]:
+                            st.session_state.pop(k, None)
+                        for task in selected_tasks:
+                            st.session_state.pop(f"qty_{task}", None)
+
+                        _rerun()
                     except Exception as exc:
                         st.error(f"Task could not be saved: {exc}")
 
